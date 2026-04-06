@@ -66,6 +66,9 @@ Script output:
 - Logs/data are stored under `ux0:data/BatteryConsumption*`.
 - For root tracking, use `BatteryConsumptionKernel.skprx` under `*KERNEL`.
 - `BatteryConsumptionKernel.suprx` is intentionally safe/no-op and should not be used as a root tracker.
+- Runtime logs:
+  - app: `ux0:logs/BatteryConsumption/BatteryConsumptionApp.log`
+  - plugin: `ux0:logs/BatteryConsumption/BatteryConsumptionPlugin.log`
 
 ## GitHub Publish Quickstart
 

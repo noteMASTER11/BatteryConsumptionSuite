@@ -4,11 +4,14 @@
 #include <psp2kern/kernel/iofilemgr.h>
 #include <psp2kern/power.h>
 #include <taihen.h>
+#include <stdarg.h>
 #include <string.h>
 
 #define SECOND_US 1000000ULL
 #define DATA_DIR "ux0:data/BatteryConsumption"
 #define SESSIONS_PATH "ux0:data/BatteryConsumption_sessions.csv"
+#define LOG_DIR "ux0:logs/BatteryConsumption"
+#define PLUGIN_LOG_PATH "ux0:logs/BatteryConsumption/BatteryConsumptionPlugin.log"
 #define PLUGIN_TITLEID "BATC00001"
 #define MIN_WRITE_SESSION_US (15ULL * SECOND_US)
 #define EVENT_DEBOUNCE_US (800ULL * 1000ULL)
@@ -29,6 +32,28 @@ static SessionState g_state;
 static SceUID g_last_event_pid = -1;
 static int g_last_event_code = -1;
 static SceUInt64 g_last_event_tick = 0;
+
+static void plugin_logf(const char *fmt, ...) {
+	char body[224];
+	char line[320];
+	va_list ap;
+	SceUID fd;
+	SceUInt64 tick = ksceKernelGetSystemTimeWide();
+	unsigned int sec = (unsigned int)(tick / SECOND_US);
+	unsigned int ms = (unsigned int)((tick % SECOND_US) / 1000ULL);
+
+	va_start(ap, fmt);
+	vsnprintf(body, sizeof(body), fmt, ap);
+	va_end(ap);
+
+	snprintf(line, sizeof(line), "[%u.%03u] %s\n", sec, ms, body);
+	fd = ksceIoOpen(PLUGIN_LOG_PATH, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+	if (fd < 0) {
+		return;
+	}
+	ksceIoWrite(fd, line, (SceSize)strlen(line));
+	ksceIoClose(fd);
+}
 
 static int get_titleid_from_pid(SceUID pid, char *out, unsigned int out_size) {
 	SceUID modid;
@@ -96,6 +121,8 @@ static void ensure_files_ready(void) {
 	SceUID fd;
 	ksceIoMkdir("ux0:data", 6);
 	ksceIoMkdir(DATA_DIR, 6);
+	ksceIoMkdir("ux0:logs", 6);
+	ksceIoMkdir(LOG_DIR, 6);
 
 	fd = ksceIoOpen(SESSIONS_PATH, SCE_O_RDONLY, 0);
 	if (fd >= 0) {
@@ -125,6 +152,7 @@ static void session_start(SceUID pid, const char *titleid) {
 	g_state.start_pct = kscePowerGetBatteryLifePercent();
 	g_state.start_mah = kscePowerGetBatteryRemainCapacity();
 	g_state.start_mv = kscePowerGetBatteryVolt();
+	plugin_logf("session start: pid=%d app=%s pct=%d mah=%d", (int)pid, g_state.app, g_state.start_pct, g_state.start_mah);
 }
 
 static void session_close(const char *reason) {
@@ -140,7 +168,6 @@ static void session_close(const char *reason) {
 	int d_mah;
 	char line[320];
 	SceUID fd;
-	(void)reason;
 
 	if (!g_state.active) {
 		return;
@@ -181,6 +208,9 @@ static void session_close(const char *reason) {
 			ksceIoWrite(fd, line, (SceSize)strlen(line));
 			ksceIoClose(fd);
 		}
+		plugin_logf("session close: reason=%s app=%s dmah=%d dpct=%d dur_ms=%u", reason ? reason : "?", g_state.app, d_mah, d_pct, (unsigned int)(delta_us / 1000ULL));
+	} else {
+		plugin_logf("session skip: reason=%s app=%s delta_us=%u dmah=%d dpct=%d", reason ? reason : "?", g_state.app, (unsigned int)delta_us, d_mah, d_pct);
 	}
 
 	memset(&g_state, 0, sizeof(g_state));
@@ -240,8 +270,10 @@ int module_start(SceSize args, void *argp) {
 		proc_event_handler);
 
 	if (g_hook_uid < 0) {
+		plugin_logf("module start failed: hook=%d", (int)g_hook_uid);
 		return SCE_KERNEL_START_FAILED;
 	}
+	plugin_logf("module start ok");
 	return SCE_KERNEL_START_SUCCESS;
 }
 
@@ -253,5 +285,6 @@ int module_stop(SceSize args, void *argp) {
 		taiHookReleaseForKernel(g_hook_uid, g_proc_event_ref);
 		g_hook_uid = -1;
 	}
+	plugin_logf("module stop");
 	return SCE_KERNEL_STOP_SUCCESS;
 }

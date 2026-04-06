@@ -23,6 +23,8 @@
 #define SESSIONS_PATH "ux0:data/BatteryConsumption_sessions.csv"
 #define PENDING_PATH "ux0:data/BatteryConsumption_pending.txt"
 #define KERNEL_STATE_PATH "ux0:data/BatteryConsumption_kernel_state.txt"
+#define APP_LOG_DIR "ux0:logs/BatteryConsumption"
+#define APP_LOG_PATH "ux0:logs/BatteryConsumption/BatteryConsumptionApp.log"
 #define APP_PLUGIN_PATH "app0:plugin/BatteryConsumptionKernel.skprx"
 #define UR0_PLUGIN_PATH "ur0:tai/BatteryConsumptionKernel.skprx"
 #define UR0_CONFIG_PATH "ur0:tai/config.txt"
@@ -86,6 +88,32 @@ typedef struct AppAgg {
 	double minutes;
 	int sessions;
 } AppAgg;
+
+static void app_logf(const char *fmt, ...) {
+	char body[256];
+	char line[352];
+	va_list ap;
+	SceDateTime dt;
+	SceUID fd;
+
+	va_start(ap, fmt);
+	vsnprintf(body, sizeof(body), fmt, ap);
+	va_end(ap);
+
+	memset(&dt, 0, sizeof(dt));
+	sceRtcGetCurrentClockLocalTime(&dt);
+	snprintf(line, sizeof(line), "[%04d-%02d-%02d %02d:%02d:%02d] %s\n",
+		dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, body);
+
+	sceIoMkdir("ux0:logs", 6);
+	sceIoMkdir(APP_LOG_DIR, 6);
+	fd = sceIoOpen(APP_LOG_PATH, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+	if (fd < 0) {
+		return;
+	}
+	sceIoWrite(fd, line, (unsigned int)strlen(line));
+	sceIoClose(fd);
+}
 
 static void copy_text(char *dst, size_t dst_size, const char *src) {
 	if (!dst || dst_size == 0) {
@@ -405,12 +433,15 @@ static int install_kernel_plugin(void) {
 	sceIoMkdir("ur0:tai", 6);
 	ret = copy_file_sce(APP_PLUGIN_PATH, UR0_PLUGIN_PATH);
 	if (ret < 0) {
+		app_logf("plugin install failed: copy %s -> %s ret=%d", APP_PLUGIN_PATH, UR0_PLUGIN_PATH, ret);
 		return -10 + ret;
 	}
 	ret = ensure_kernel_config_line();
 	if (ret < 0) {
+		app_logf("plugin install failed: config update ret=%d", ret);
 		return -20 + ret;
 	}
+	app_logf("plugin install ok: %s", UR0_PLUGIN_PATH);
 	return 0;
 }
 
@@ -833,11 +864,15 @@ int main(int argc, char *argv[]) {
 	agg_count = load_aggregates(aggregates, MAX_AGG);
 	kernel_enabled = kernel_plugin_is_enabled();
 	last_heavy_refresh_us = last_sample_us;
+	app_logf("app start: apps=%d discover_ret=0x%08X kernel_enabled=%d", app_count, discover_ret, kernel_enabled);
 	if (!kernel_enabled) {
 		int auto_install = install_kernel_plugin();
 		kernel_enabled = kernel_plugin_is_enabled();
 		if (auto_install == 0 && kernel_enabled) {
 			copy_text(status, sizeof(status), "Kernel plugin deployed from VPK. Reboot required.");
+			app_logf("auto deploy plugin success; reboot required");
+		} else if (auto_install != 0) {
+			app_logf("auto deploy plugin failed: %d", auto_install);
 		}
 	}
 	printf("\e[0m\e[37;40m\e[2J\e[H");
@@ -850,6 +885,7 @@ int main(int argc, char *argv[]) {
 		pressed = pad.buttons & ~prev.buttons;
 
 		if (pressed & SCE_CTRL_START) {
+			app_logf("app stop requested");
 			running = 0;
 		}
 		if (pressed & SCE_CTRL_UP) {
@@ -869,8 +905,10 @@ int main(int argc, char *argv[]) {
 			if (append_sample(&snapshot) >= 0) {
 				recent_count = load_recent_samples(recent_samples, MAX_RECENT_SAMPLES);
 				copy_text(status, sizeof(status), "Sample appended");
+				app_logf("manual sample appended: pct=%d mAh=%d", snapshot.percent, snapshot.remain_mah);
 			} else {
 				copy_text(status, sizeof(status), "Sample append failed");
+				app_logf("manual sample append failed");
 			}
 			dirty = 1;
 		}
@@ -889,8 +927,10 @@ int main(int argc, char *argv[]) {
 				pending.start_mv = snapshot.mv;
 				if (save_pending(&pending) >= 0) {
 					copy_text(status, sizeof(status), "Session armed. Exit and play.");
+					app_logf("pending armed: app=%s start_pct=%d start_mah=%d", pending.app, pending.start_percent, pending.start_mah);
 				} else {
 					copy_text(status, sizeof(status), "Failed to save pending");
+					app_logf("pending arm failed: app=%s", pending.app);
 				}
 			}
 			dirty = 1;
@@ -906,8 +946,10 @@ int main(int argc, char *argv[]) {
 					clear_pending(&pending);
 					agg_count = load_aggregates(aggregates, MAX_AGG);
 					snprintf(status, sizeof(status), "Session closed: d=%d mAh, %d%%", dmah, dpct);
+					app_logf("pending closed: dmah=%d dpct=%d", dmah, dpct);
 				} else {
 					copy_text(status, sizeof(status), "Failed to append session");
+					app_logf("pending close failed");
 				}
 			}
 			dirty = 1;
@@ -926,6 +968,7 @@ int main(int argc, char *argv[]) {
 			agg_count = load_aggregates(aggregates, MAX_AGG);
 			kernel_enabled = kernel_plugin_is_enabled();
 			copy_text(status, sizeof(status), "Reload done");
+			app_logf("reload: apps=%d discover_ret=0x%08X kernel_enabled=%d", app_count, discover_ret, kernel_enabled);
 			dirty = 1;
 		}
 		if (pressed & SCE_CTRL_RTRIGGER) {
@@ -933,8 +976,10 @@ int main(int argc, char *argv[]) {
 			kernel_enabled = kernel_plugin_is_enabled();
 			if (iret == 0) {
 				copy_text(status, sizeof(status), "Kernel plugin installed. Reboot required.");
+				app_logf("manual plugin install success; reboot required");
 			} else {
 				snprintf(status, sizeof(status), "Install failed: %d", iret);
+				app_logf("manual plugin install failed: %d", iret);
 			}
 			dirty = 1;
 		}
@@ -944,6 +989,7 @@ int main(int argc, char *argv[]) {
 			append_sample(&snapshot);
 			recent_count = load_recent_samples(recent_samples, MAX_RECENT_SAMPLES);
 			last_sample_us = now_us;
+			app_logf("periodic sample: pct=%d mAh=%d", snapshot.percent, snapshot.remain_mah);
 			dirty = 1;
 		}
 
@@ -984,6 +1030,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	psvDebugScreenFinish();
+	app_logf("app stopped");
 	sceKernelExitProcess(0);
 	return 0;
 }
