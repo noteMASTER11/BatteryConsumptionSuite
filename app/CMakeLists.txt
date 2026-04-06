@@ -13,7 +13,7 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "BatteryConsumption")
 set(VITA_TITLEID  "BATC00001")
-set(VITA_VERSION  "01.00")
+set(VITA_VERSION  "01.01")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu11 -O2")
 
