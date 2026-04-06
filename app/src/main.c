@@ -21,12 +21,17 @@
 #define APPS_PATH "ux0:data/BatteryConsumption_apps.txt"
 #define SAMPLES_PATH "ux0:data/BatteryConsumption_samples.csv"
 #define SESSIONS_PATH "ux0:data/BatteryConsumption_sessions.csv"
+#define SCREEN_PATH "ux0:data/BatteryConsumption_screen.csv"
 #define PENDING_PATH "ux0:data/BatteryConsumption_pending.txt"
 #define KERNEL_STATE_PATH "ux0:data/BatteryConsumption_kernel_state.txt"
 #define APP_LOG_DIR "ux0:logs/BatteryConsumption"
 #define APP_LOG_PATH "ux0:logs/BatteryConsumption/BatteryConsumptionApp.log"
-#define APP_PLUGIN_PATH "app0:plugin/BatteryConsumptionKernel.skprx"
-#define UR0_PLUGIN_PATH "ur0:tai/BatteryConsumptionKernel.skprx"
+#define APP_PLUGIN_SKPRX_PATH "app0:plugin/BatteryConsumptionKernel.skprx"
+#define APP_PLUGIN_SUPRX_PATH "app0:plugin/BatteryConsumptionKernel.suprx"
+#define UR0_PLUGIN_SKPRX_PATH "ur0:tai/BatteryConsumptionKernel.skprx"
+#define UR0_PLUGIN_SUPRX_PATH "ur0:tai/BatteryConsumptionKernel.suprx"
+#define UR0_OLD_PLUGIN_SKPRX_PATH "ur0:tai/batteryconsumption_kernel.skprx"
+#define UR0_OLD_PLUGIN_SUPRX_PATH "ur0:tai/batteryconsumption_kernel.suprx"
 #define UR0_CONFIG_PATH "ur0:tai/config.txt"
 
 #define MAX_APPS 48
@@ -88,6 +93,13 @@ typedef struct AppAgg {
 	double minutes;
 	int sessions;
 } AppAgg;
+
+typedef struct ScreenAgg {
+	double consumed_mah;
+	double consumed_pct;
+	double minutes;
+	int sessions;
+} ScreenAgg;
 
 static void app_logf(const char *fmt, ...) {
 	char body[256];
@@ -154,6 +166,23 @@ static void sanitize_app_name(char *s) {
 		}
 	}
 	trim_text(s);
+}
+
+static int is_titleid_string(const char *s) {
+	if (!s) {
+		return 0;
+	}
+	return
+		(s[0] >= 'A' && s[0] <= 'Z') &&
+		(s[1] >= 'A' && s[1] <= 'Z') &&
+		(s[2] >= 'A' && s[2] <= 'Z') &&
+		(s[3] >= 'A' && s[3] <= 'Z') &&
+		(s[4] >= '0' && s[4] <= '9') &&
+		(s[5] >= '0' && s[5] <= '9') &&
+		(s[6] >= '0' && s[6] <= '9') &&
+		(s[7] >= '0' && s[7] <= '9') &&
+		(s[8] >= '0' && s[8] <= '9') &&
+		s[9] == '\0';
 }
 
 static int app_index_of(char apps[][MAX_APP_NAME], int app_count, const char *name) {
@@ -258,12 +287,14 @@ static int try_discover_titles_for_shell(char apps[][MAX_APP_NAME], int *app_cou
 }
 
 static void collect_snapshot(BatterySnapshot *s) {
+	int raw_charging;
 	memset(s, 0, sizeof(*s));
 	sceRtcGetCurrentTick(&s->tick_utc);
 	s->percent = scePowerGetBatteryLifePercent();
 	s->life_min = scePowerGetBatteryLifeTime();
-	s->charging = scePowerIsBatteryCharging();
+	raw_charging = scePowerIsBatteryCharging();
 	s->online = scePowerIsPowerOnline();
+	s->charging = (raw_charging || s->online) ? 1 : 0;
 	s->low = scePowerIsLowBattery();
 	s->soh = scePowerGetBatterySOH();
 	s->cycle_count = scePowerGetBatteryCycleCount();
@@ -306,6 +337,28 @@ static int path_exists(const char *path) {
 	}
 	sceIoClose(fd);
 	return 1;
+}
+
+static int get_file_size_sce(const char *path, int *out_size) {
+	SceIoStat st;
+	if (!path || !out_size) {
+		return -1;
+	}
+	memset(&st, 0, sizeof(st));
+	if (sceIoGetstat(path, &st) < 0) {
+		return -1;
+	}
+	*out_size = (int)st.st_size;
+	return 0;
+}
+
+static void remove_file_if_exists(const char *path) {
+	if (!path) {
+		return;
+	}
+	if (path_exists(path)) {
+		sceIoRemove(path);
+	}
 }
 
 static int copy_file_sce(const char *src_path, const char *dst_path) {
@@ -371,45 +424,84 @@ static int write_text_sce(const char *path, const char *text) {
 
 static int ensure_kernel_config_line(void) {
 	char cfg[32768];
-	char out[33792];
 	const char *line = "ur0:tai/BatteryConsumptionKernel.skprx";
+	char out[33792];
 	int n = read_text_sce(UR0_CONFIG_PATH, cfg, sizeof(cfg));
+	int has_kernel = 0;
+	int inserted = 0;
+	char *p;
 
 	if (n < 0) {
 		snprintf(out, sizeof(out), "*KERNEL\n%s\n", line);
 		return write_text_sce(UR0_CONFIG_PATH, out);
 	}
-	if (strstr(cfg, line) != NULL) {
-		return 1;
-	}
 
-	{
-		char *kernel = strstr(cfg, "*KERNEL");
-		if (!kernel) {
-			snprintf(out, sizeof(out), "%s%s*KERNEL\n%s\n",
-				cfg,
-				(n > 0 && cfg[n - 1] == '\n') ? "" : "\n",
-				line);
-		} else {
-			char *insert = strchr(kernel, '\n');
-			size_t pre;
-			size_t need;
-			if (insert) {
-				insert++;
-			} else {
-				insert = cfg + strlen(cfg);
-			}
-			pre = (size_t)(insert - cfg);
-			need = pre + strlen(line) + 1 + strlen(insert) + 1;
-			if (need >= sizeof(out)) {
+	out[0] = '\0';
+	p = cfg;
+	while (*p) {
+		char one[512];
+		char trim[512];
+		size_t len = 0;
+		while (p[len] && p[len] != '\n' && len < sizeof(one) - 1) {
+			one[len] = p[len];
+			len++;
+		}
+		one[len] = '\0';
+		copy_text(trim, sizeof(trim), one);
+		trim_text(trim);
+
+		if (strcmp(trim, "*KERNEL") == 0) {
+			has_kernel = 1;
+			if (strlen(out) + len + 2 >= sizeof(out)) {
 				return -3;
 			}
-			memcpy(out, cfg, pre);
-			out[pre] = '\0';
-			strcat(out, line);
+			strcat(out, one);
 			strcat(out, "\n");
-			strcat(out, insert);
+			if (!inserted) {
+				if (strlen(out) + strlen(line) + 2 >= sizeof(out)) {
+					return -3;
+				}
+				strcat(out, line);
+				strcat(out, "\n");
+				inserted = 1;
+			}
+		} else if (strstr(trim, "BatteryConsumptionKernel.skprx") ||
+		           strstr(trim, "batteryconsumption_kernel.skprx") ||
+		           strstr(trim, "BatteryConsumptionKernel.suprx") ||
+		           strstr(trim, "batteryconsumption_kernel.suprx")) {
+			/* drop old plugin lines and keep only the new canonical line */
+		} else {
+			if (strlen(out) + len + 2 >= sizeof(out)) {
+				return -3;
+			}
+			strcat(out, one);
+			strcat(out, "\n");
 		}
+		p += len;
+		if (*p == '\n') {
+			p++;
+		}
+	}
+
+	if (!has_kernel) {
+		if (strlen(out) > 0 && out[strlen(out) - 1] != '\n') {
+			if (strlen(out) + 1 >= sizeof(out)) {
+				return -3;
+			}
+			strcat(out, "\n");
+		}
+		if (strlen(out) + strlen("*KERNEL\n") + strlen(line) + 2 >= sizeof(out)) {
+			return -3;
+		}
+		strcat(out, "*KERNEL\n");
+		strcat(out, line);
+		strcat(out, "\n");
+	} else if (!inserted) {
+		if (strlen(out) + strlen(line) + 2 >= sizeof(out)) {
+			return -3;
+		}
+		strcat(out, line);
+		strcat(out, "\n");
 	}
 
 	return write_text_sce(UR0_CONFIG_PATH, out);
@@ -418,7 +510,7 @@ static int ensure_kernel_config_line(void) {
 static int kernel_plugin_is_enabled(void) {
 	char cfg[32768];
 	int n;
-	if (!path_exists(UR0_PLUGIN_PATH)) {
+	if (!path_exists(UR0_PLUGIN_SKPRX_PATH)) {
 		return 0;
 	}
 	n = read_text_sce(UR0_CONFIG_PATH, cfg, sizeof(cfg));
@@ -428,20 +520,56 @@ static int kernel_plugin_is_enabled(void) {
 	return strstr(cfg, "ur0:tai/BatteryConsumptionKernel.skprx") != NULL;
 }
 
-static int install_kernel_plugin(void) {
-	int ret;
+static int plugins_need_update(void) {
+	int app_skprx = 0;
+	int ur0_skprx = 0;
+	int app_suprx = 0;
+	int ur0_suprx = 0;
+	if (get_file_size_sce(APP_PLUGIN_SKPRX_PATH, &app_skprx) < 0) {
+		return -1;
+	}
+	if (get_file_size_sce(APP_PLUGIN_SUPRX_PATH, &app_suprx) < 0) {
+		return -2;
+	}
+	if (get_file_size_sce(UR0_PLUGIN_SKPRX_PATH, &ur0_skprx) < 0) {
+		return 1;
+	}
+	if (get_file_size_sce(UR0_PLUGIN_SUPRX_PATH, &ur0_suprx) < 0) {
+		return 1;
+	}
+	if (app_skprx != ur0_skprx || app_suprx != ur0_suprx) {
+		return 1;
+	}
+	return 0;
+}
+
+static int install_plugins(void) {
+	int ret_skprx;
+	int ret_suprx;
+	int ret_cfg;
 	sceIoMkdir("ur0:tai", 6);
-	ret = copy_file_sce(APP_PLUGIN_PATH, UR0_PLUGIN_PATH);
-	if (ret < 0) {
-		app_logf("plugin install failed: copy %s -> %s ret=%d", APP_PLUGIN_PATH, UR0_PLUGIN_PATH, ret);
-		return -10 + ret;
+	remove_file_if_exists(UR0_PLUGIN_SKPRX_PATH);
+	remove_file_if_exists(UR0_PLUGIN_SUPRX_PATH);
+	remove_file_if_exists(UR0_OLD_PLUGIN_SKPRX_PATH);
+	remove_file_if_exists(UR0_OLD_PLUGIN_SUPRX_PATH);
+
+	ret_skprx = copy_file_sce(APP_PLUGIN_SKPRX_PATH, UR0_PLUGIN_SKPRX_PATH);
+	if (ret_skprx < 0) {
+		app_logf("plugin install failed: copy skprx %s -> %s ret=%d", APP_PLUGIN_SKPRX_PATH, UR0_PLUGIN_SKPRX_PATH, ret_skprx);
+		return -10 + ret_skprx;
 	}
-	ret = ensure_kernel_config_line();
-	if (ret < 0) {
-		app_logf("plugin install failed: config update ret=%d", ret);
-		return -20 + ret;
+	ret_suprx = copy_file_sce(APP_PLUGIN_SUPRX_PATH, UR0_PLUGIN_SUPRX_PATH);
+	if (ret_suprx < 0) {
+		app_logf("plugin install failed: copy suprx %s -> %s ret=%d", APP_PLUGIN_SUPRX_PATH, UR0_PLUGIN_SUPRX_PATH, ret_suprx);
+		return -20 + ret_suprx;
 	}
-	app_logf("plugin install ok: %s", UR0_PLUGIN_PATH);
+
+	ret_cfg = ensure_kernel_config_line();
+	if (ret_cfg < 0) {
+		app_logf("plugin install failed: config update ret=%d", ret_cfg);
+		return -30 + ret_cfg;
+	}
+	app_logf("plugin install ok: %s and %s", UR0_PLUGIN_SKPRX_PATH, UR0_PLUGIN_SUPRX_PATH);
 	return 0;
 }
 
@@ -583,6 +711,56 @@ static int ensure_sessions_file(void) {
 	return 0;
 }
 
+static int load_screen_aggregate(ScreenAgg *screen) {
+	FILE *f = fopen(SCREEN_PATH, "r");
+	char line[384];
+	if (!screen) {
+		return -1;
+	}
+	memset(screen, 0, sizeof(*screen));
+	if (!f) {
+		return -1;
+	}
+	while (fgets(line, sizeof(line), f)) {
+		unsigned long long start_tick = 0, end_tick = 0;
+		char state[32];
+		int start_pct = 0, end_pct = 0, d_pct = 0;
+		int start_mah = 0, end_mah = 0, d_mah = 0;
+		int start_mv = 0, end_mv = 0;
+		double minutes = 0.0;
+		char reason[32];
+		int parsed;
+
+		if (line[0] == '#') {
+			continue;
+		}
+
+		memset(state, 0, sizeof(state));
+		memset(reason, 0, sizeof(reason));
+		parsed = sscanf(line, "%llu,%llu,%31[^,],%d,%d,%d,%d,%d,%d,%d,%d,%lf,%31s",
+			&start_tick, &end_tick, state,
+			&start_pct, &end_pct, &d_pct,
+			&start_mah, &end_mah, &d_mah,
+			&start_mv, &end_mv, &minutes, reason);
+		if (parsed != 13) {
+			continue;
+		}
+		if (strcmp(state, "SCREEN_ON") != 0) {
+			continue;
+		}
+		screen->sessions += 1;
+		screen->minutes += minutes;
+		if (d_mah > 0) {
+			screen->consumed_mah += (double)d_mah;
+		}
+		if (d_pct > 0) {
+			screen->consumed_pct += (double)d_pct;
+		}
+	}
+	fclose(f);
+	return 0;
+}
+
 static int append_session(const PendingSession *p, const BatterySnapshot *end_s, int *out_dmah, int *out_dpct) {
 	FILE *f;
 	SceUInt64 delta_tick;
@@ -682,7 +860,7 @@ static int load_aggregates(AppAgg *aggs, int max_aggs) {
 			continue;
 		}
 		sanitize_app_name(app);
-		if (!app[0]) {
+		if (!app[0] || !is_titleid_string(app)) {
 			continue;
 		}
 
@@ -770,7 +948,8 @@ static void draw_dashboard(
 	const SampleRow *samples,
 	int sample_count,
 	const AppAgg *aggs,
-	int agg_count
+	int agg_count,
+	const ScreenAgg *screen
 ) {
 	char now[40];
 	char start[40];
@@ -780,7 +959,7 @@ static void draw_dashboard(
 	int d_mah = 0;
 
 	format_tick_local(&s->tick_utc, now, sizeof(now));
-	print_line_fixed("BatteryConsumption v0.2  |  one-screen dashboard");
+	print_line_fixed("BatteryConsumption v0.3  |  one-screen dashboard");
 	print_line_fixed("Now: %s", now);
 	print_line_fixed("Battery: %d%%  %d/%d mAh  %d mV  | chg=%s online=%s low=%s",
 		s->percent, s->remain_mah, s->full_mah, s->mv,
@@ -810,12 +989,16 @@ static void draw_dashboard(
 	} else {
 		print_line_fixed("History window: not enough data (%d row)", sample_count);
 	}
+	if (screen) {
+		print_line_fixed("Screen active: %.1f min | %.1f mAh | %.1f%% | slices=%d",
+			screen->minutes, screen->consumed_mah, screen->consumed_pct, screen->sessions);
+	}
 
 	draw_history_ascii(samples, sample_count);
 	print_line_fixed("Top apps by total consumption:");
 	draw_agg_ascii(aggs, agg_count);
 	print_line_fixed("Status: %s", status);
-	print_line_fixed("Controls: UP/DOWN app | CROSS sample | SQUARE arm | CIRCLE close | TRIANGLE reload | R install plugin | START exit");
+	print_line_fixed("Controls: UP/DOWN app | CROSS sample | SQUARE arm | CIRCLE close | TRIANGLE reload | R sync plugins | SELECT reboot | START exit");
 }
 
 int main(int argc, char *argv[]) {
@@ -824,6 +1007,7 @@ int main(int argc, char *argv[]) {
 	PendingSession pending;
 	SampleRow recent_samples[MAX_RECENT_SAMPLES];
 	AppAgg aggregates[MAX_AGG];
+	ScreenAgg screen_agg;
 	char apps[MAX_APPS][MAX_APP_NAME];
 	char status[MAX_STATUS];
 	SceUInt64 last_sample_us = 0;
@@ -837,6 +1021,7 @@ int main(int argc, char *argv[]) {
 	int running = 1;
 	int discover_ret = -1;
 	int kernel_enabled = 0;
+	int reboot_confirm = 0;
 	int dirty = 1;
 
 	(void)argc;
@@ -846,6 +1031,7 @@ int main(int argc, char *argv[]) {
 	memset(&prev, 0, sizeof(prev));
 	memset(&snapshot, 0, sizeof(snapshot));
 	memset(&pending, 0, sizeof(pending));
+	memset(&screen_agg, 0, sizeof(screen_agg));
 	memset(status, 0, sizeof(status));
 	copy_text(status, sizeof(status), "Ready");
 
@@ -862,17 +1048,25 @@ int main(int argc, char *argv[]) {
 	recent_count = load_recent_samples(recent_samples, MAX_RECENT_SAMPLES);
 	ensure_sessions_file();
 	agg_count = load_aggregates(aggregates, MAX_AGG);
+	load_screen_aggregate(&screen_agg);
 	kernel_enabled = kernel_plugin_is_enabled();
 	last_heavy_refresh_us = last_sample_us;
 	app_logf("app start: apps=%d discover_ret=0x%08X kernel_enabled=%d", app_count, discover_ret, kernel_enabled);
-	if (!kernel_enabled) {
-		int auto_install = install_kernel_plugin();
-		kernel_enabled = kernel_plugin_is_enabled();
-		if (auto_install == 0 && kernel_enabled) {
-			copy_text(status, sizeof(status), "Kernel plugin deployed from VPK. Reboot required.");
-			app_logf("auto deploy plugin success; reboot required");
-		} else if (auto_install != 0) {
-			app_logf("auto deploy plugin failed: %d", auto_install);
+	{
+		int need_update = plugins_need_update();
+		if (!kernel_enabled || need_update > 0) {
+			int auto_install = install_plugins();
+			kernel_enabled = kernel_plugin_is_enabled();
+			if (auto_install == 0 && kernel_enabled) {
+				copy_text(status, sizeof(status), "Plugins synced from VPK. Reboot required.");
+				app_logf("auto plugin sync success; reboot required");
+			} else if (auto_install != 0) {
+				snprintf(status, sizeof(status), "Auto plugin sync failed: %d", auto_install);
+				app_logf("auto plugin sync failed: %d", auto_install);
+			}
+		} else if (need_update < 0) {
+			snprintf(status, sizeof(status), "Plugin payload missing in VPK: %d", need_update);
+			app_logf("plugin payload check failed: %d", need_update);
 		}
 	}
 	printf("\e[0m\e[37;40m\e[2J\e[H");
@@ -884,9 +1078,32 @@ int main(int argc, char *argv[]) {
 		sceCtrlPeekBufferPositive(0, &pad, 1);
 		pressed = pad.buttons & ~prev.buttons;
 
+		if (reboot_confirm) {
+			if (pressed & SCE_CTRL_CROSS) {
+				app_logf("reboot confirmed");
+				copy_text(status, sizeof(status), "Rebooting...");
+				dirty = 1;
+				scePowerRequestColdReset();
+			} else if (pressed & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) {
+				reboot_confirm = 0;
+				copy_text(status, sizeof(status), "Reboot canceled");
+				app_logf("reboot canceled");
+				dirty = 1;
+			}
+			prev = pad;
+			sceKernelDelayThread(UI_LOOP_SLEEP_US);
+			continue;
+		}
+
 		if (pressed & SCE_CTRL_START) {
 			app_logf("app stop requested");
 			running = 0;
+		}
+		if (pressed & SCE_CTRL_SELECT) {
+			reboot_confirm = 1;
+			copy_text(status, sizeof(status), "Reboot confirm: CROSS yes, CIRCLE no");
+			app_logf("reboot confirm opened");
+			dirty = 1;
 		}
 		if (pressed & SCE_CTRL_UP) {
 			if (selected_app > 0) {
@@ -966,20 +1183,21 @@ int main(int argc, char *argv[]) {
 			load_pending(&pending);
 			recent_count = load_recent_samples(recent_samples, MAX_RECENT_SAMPLES);
 			agg_count = load_aggregates(aggregates, MAX_AGG);
+			load_screen_aggregate(&screen_agg);
 			kernel_enabled = kernel_plugin_is_enabled();
 			copy_text(status, sizeof(status), "Reload done");
 			app_logf("reload: apps=%d discover_ret=0x%08X kernel_enabled=%d", app_count, discover_ret, kernel_enabled);
 			dirty = 1;
 		}
 		if (pressed & SCE_CTRL_RTRIGGER) {
-			int iret = install_kernel_plugin();
+			int iret = install_plugins();
 			kernel_enabled = kernel_plugin_is_enabled();
 			if (iret == 0) {
-				copy_text(status, sizeof(status), "Kernel plugin installed. Reboot required.");
-				app_logf("manual plugin install success; reboot required");
+				copy_text(status, sizeof(status), "Plugins synced from VPK. Reboot required.");
+				app_logf("manual plugin sync success; reboot required");
 			} else {
-				snprintf(status, sizeof(status), "Install failed: %d", iret);
-				app_logf("manual plugin install failed: %d", iret);
+				snprintf(status, sizeof(status), "Plugin sync failed: %d", iret);
+				app_logf("manual plugin sync failed: %d", iret);
 			}
 			dirty = 1;
 		}
@@ -1003,6 +1221,7 @@ int main(int argc, char *argv[]) {
 			load_pending(&pending);
 			recent_count = load_recent_samples(recent_samples, MAX_RECENT_SAMPLES);
 			agg_count = load_aggregates(aggregates, MAX_AGG);
+			load_screen_aggregate(&screen_agg);
 			kernel_enabled = kernel_plugin_is_enabled();
 			last_heavy_refresh_us = now_us;
 			dirty = 1;
@@ -1020,7 +1239,8 @@ int main(int argc, char *argv[]) {
 				recent_samples,
 				recent_count,
 				aggregates,
-				agg_count);
+				agg_count,
+				&screen_agg);
 			last_draw_us = now_us;
 			dirty = 0;
 		}

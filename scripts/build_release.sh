@@ -18,6 +18,7 @@ cmake --build "$SUPRX_DIR/build" -j4
 echo "[3/5] Copy plugin payload to app"
 mkdir -p "$APP_DIR/plugin"
 cp "$KERNEL_DIR/build/BatteryConsumptionKernel.skprx" "$APP_DIR/plugin/BatteryConsumptionKernel.skprx"
+cp "$SUPRX_DIR/build/BatteryConsumptionKernel.suprx" "$APP_DIR/plugin/BatteryConsumptionKernel.suprx"
 
 echo "[4/5] Build app VPK"
 cmake -S "$APP_DIR" -B "$APP_DIR/build"
