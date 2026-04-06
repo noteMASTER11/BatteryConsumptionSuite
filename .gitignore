@@ -1,0 +1,24 @@
+# build directories
+**/build/
+
+# release outputs
+dist/
+*.vpk
+*.self
+*.skprx
+*.suprx
+*.velf
+*.out
+
+# cmake generated
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/Makefile
+**/CMakeFiles/
+
+# local editor/OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+
