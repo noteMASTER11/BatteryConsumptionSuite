@@ -1,0 +1,7 @@
+active=1
+app=APPA00001
+pid=1337
+start_tick=7000000000
+start_pct=92
+start_mah=2250
+start_mv=3980

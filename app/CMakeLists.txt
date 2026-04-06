@@ -17,23 +17,30 @@ set(VITA_VERSION  "01.01")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu11 -O2")
 
-include_directories(
-  ../common
-)
-
 add_executable(${PROJECT_NAME}
   src/main.c
-  ../common/debugScreen.c
 )
 
 target_link_libraries(${PROJECT_NAME}
+  vita2d
+  png
+  jpeg
+  z
+  m
+  c
   SceAppMgr_stub
+  SceCommonDialog_stub
   SceCtrl_stub
   SceDisplay_stub
+  SceGxm_stub
   SceKernelThreadMgr_stub
+  SceNet_stub
+  SceNetCtl_stub
+  ScePgf_stub
   ScePower_stub
   SceProcessmgr_stub
   SceRtc_stub
+  SceSysmodule_stub
 )
 
 vita_create_self(${PROJECT_NAME}.self ${PROJECT_NAME} UNSAFE)

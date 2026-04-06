@@ -1,0 +1,42 @@
+[
+    {
+        "rank":  1,
+        "app":  "APPA00001",
+        "label":  "WipEout 2048",
+        "cur_mAh":  10,
+        "total_mAh":  150,
+        "up_min":  110,
+        "mAh_per_h":  81.8,
+        "sessions":  2
+    },
+    {
+        "rank":  2,
+        "app":  "APPB00002",
+        "label":  "Gravity Rush",
+        "cur_mAh":  0,
+        "total_mAh":  80,
+        "up_min":  60,
+        "mAh_per_h":  80,
+        "sessions":  1
+    },
+    {
+        "rank":  3,
+        "app":  "System",
+        "label":  "System",
+        "cur_mAh":  8,
+        "total_mAh":  55,
+        "up_min":  70,
+        "mAh_per_h":  47.1,
+        "sessions":  2
+    },
+    {
+        "rank":  4,
+        "app":  "UNKNOWN",
+        "label":  "UNKNOWN",
+        "cur_mAh":  0,
+        "total_mAh":  25,
+        "up_min":  15,
+        "mAh_per_h":  100,
+        "sessions":  1
+    }
+]
