@@ -9,9 +9,9 @@
 #define SECOND_US 1000000ULL
 #define DATA_DIR "ux0:data/BatteryConsumption"
 #define SESSIONS_PATH "ux0:data/BatteryConsumption_sessions.csv"
-#define STATE_PATH "ux0:data/BatteryConsumption_kernel_state.txt"
 #define PLUGIN_TITLEID "BATC00001"
 #define MIN_WRITE_SESSION_US (15ULL * SECOND_US)
+#define EVENT_DEBOUNCE_US (800ULL * 1000ULL)
 
 typedef struct SessionState {
 	int active;
@@ -26,6 +26,9 @@ typedef struct SessionState {
 static tai_hook_ref_t g_proc_event_ref;
 static SceUID g_hook_uid = -1;
 static SessionState g_state;
+static SceUID g_last_event_pid = -1;
+static int g_last_event_code = -1;
+static SceUInt64 g_last_event_tick = 0;
 
 static int get_titleid_from_pid(SceUID pid, char *out, unsigned int out_size) {
 	SceUID modid;
@@ -109,15 +112,6 @@ static void ensure_files_ready(void) {
 	}
 }
 
-static void write_state_line(const char *line) {
-	SceUID fd = ksceIoOpen(STATE_PATH, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
-	if (fd < 0) {
-		return;
-	}
-	ksceIoWrite(fd, line, (SceSize)strlen(line));
-	ksceIoClose(fd);
-}
-
 static void session_start(SceUID pid, const char *titleid) {
 	if (!app_should_track(titleid)) {
 		return;
@@ -193,22 +187,36 @@ static void session_close(const char *reason) {
 }
 
 static int proc_event_handler(int pid, int ev, int a3, int a4, int *a5, int a6) {
-	char titleid[32];
-	memset(titleid, 0, sizeof(titleid));
-	if (get_titleid_from_pid(pid, titleid, sizeof(titleid)) < 0) {
-		strncpy(titleid, "UNKNOWN", sizeof(titleid) - 1);
-		titleid[sizeof(titleid) - 1] = '\0';
+	SceUInt64 now_tick;
+
+	if (!(ev == 1 || ev == 3 || ev == 4 || ev == 5)) {
+		return TAI_CONTINUE(int, g_proc_event_ref, pid, ev, a3, a4, a5, a6);
 	}
 
+	now_tick = ksceKernelGetSystemTimeWide();
+	if (pid == g_last_event_pid && ev == g_last_event_code && (now_tick - g_last_event_tick) < EVENT_DEBOUNCE_US) {
+		return TAI_CONTINUE(int, g_proc_event_ref, pid, ev, a3, a4, a5, a6);
+	}
+	g_last_event_pid = pid;
+	g_last_event_code = ev;
+	g_last_event_tick = now_tick;
+
 	if (ev == 1 || ev == 5) {
-		if (g_state.active && strncmp(g_state.app, titleid, sizeof(g_state.app) - 1) != 0) {
+		char titleid[32];
+		memset(titleid, 0, sizeof(titleid));
+		if (get_titleid_from_pid(pid, titleid, sizeof(titleid)) < 0) {
+			strncpy(titleid, "UNKNOWN", sizeof(titleid) - 1);
+			titleid[sizeof(titleid) - 1] = '\0';
+		}
+
+		if (g_state.active && g_state.pid != pid) {
 			session_close("switch");
 		}
-		if (!g_state.active) {
+		if (!g_state.active || g_state.pid != pid) {
 			session_start(pid, titleid);
 		}
 	} else if (ev == 3 || ev == 4) {
-		if (g_state.active && strncmp(g_state.app, titleid, sizeof(g_state.app) - 1) == 0) {
+		if (g_state.active && g_state.pid == pid) {
 			session_close(ev == 3 ? "exit" : "suspend");
 		}
 	}
@@ -234,7 +242,6 @@ int module_start(SceSize args, void *argp) {
 	if (g_hook_uid < 0) {
 		return SCE_KERNEL_START_FAILED;
 	}
-	write_state_line("active=0 started=1\n");
 	return SCE_KERNEL_START_SUCCESS;
 }
 
